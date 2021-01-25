@@ -34,29 +34,40 @@ class AudioEngineManager<Observer: AudioEngineObservable> {
     }
     
     func startAudioEngine() throws {
-        var engineError: Error!
-        audioEngine.atomicMutate { engine in
-            guard engine.isRunning == false else { return }
-            
-            if let error = STUnifiedErrorCatcher.try({ () -> Error? in
-                do {
-                    // start audio engine
-                    // This Api throws `Error` and raises `NSException` both.
-                    try engine.start()
+        for tryCnt in (0..<3) {
+            var engineError: Error!
+            audioEngine.atomicMutate { engine in
+                guard engine.isRunning == false else { return }
+                
+                if let error = STUnifiedErrorCatcher.try({ () -> Error? in
+                    do {
+                        // start audio engine
+                        // This Api throws `Error` and raises `NSException` both.
+                        try engine.start()
+                        
+                        os_log("audioEngine started", log: .audioEngine, type: .debug)
+                    } catch {
+                        return error
+                    }
                     
-                    os_log("audioEngine started", log: .audioEngine, type: .debug)
-                } catch {
-                    return error
+                    return nil
+                }) {
+                    engineError = error
+                }
+            }
+            
+            if let engineError = engineError,
+               (engineError as NSError).code == AVAudioSession.ErrorCode.insufficientPriority.rawValue {
+                guard tryCnt < 2 else {
+                    throw engineError
                 }
                 
-                return nil
-            }) {
-                engineError = error
+                os_log("retry start audioEngine after 1 sec.", log: .audioEngine, type: .debug)
+                sleep(1)
+                continue
             }
-        }
-        
-        if let engineError = engineError {
-            throw engineError
+            
+            break
         }
         
         // if audio session is changed then influence to the AVAudioEngine, we should handle this.

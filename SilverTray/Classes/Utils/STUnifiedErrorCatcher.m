@@ -25,7 +25,7 @@
 
 + (NSError *)try:(NSError*(NS_NOESCAPE ^)(void))tryBlock {
     @try {
-        tryBlock();
+        return tryBlock();
     } @catch (NSException *exception) {
         NSError *error = [[NSError alloc] initWithDomain:exception.name code:0 userInfo:exception.userInfo];
         return error;

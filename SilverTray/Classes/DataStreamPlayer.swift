@@ -52,7 +52,7 @@ public class DataStreamPlayer {
     
     /// If samples which is not enough to make chunk appended, It should be stored tempAudioArray and wait for other samples.
     private var tempAudioArray = [Float]()
-
+    
     /// hold entire audio buffers for seek function.
     private var audioBuffers = [AVAudioPCMBuffer]() {
         didSet {
@@ -63,8 +63,11 @@ public class DataStreamPlayer {
     }
     
     private let audioQueue = DispatchQueue(label: "com.sktelecom.romain.silver_tray.player_queue")
+    
+    // observers
     private let notificationCenter = NotificationCenter.default
     private var audioBufferObserver: Any?
+    private var audioSessionObserver: Any?
     
     #if DEBUG
     private var appendedData = Data()
@@ -159,6 +162,9 @@ public class DataStreamPlayer {
         
         // Hold this instance because properties of this should not be released outside.
         Self.audioEngineManager.registerObserver(self)
+        
+        // Audio session observer
+        addSessionObserver()
     }
     
     /**
@@ -175,6 +181,12 @@ public class DataStreamPlayer {
         }
         
         try self.init(decoder: decoder, audioFormat: audioFormat)
+    }
+    
+    deinit {
+        // remove observers
+        removeSessionObserver()
+        removeBufferObserver()
     }
     
     private func attachAudioNodes() {
@@ -250,12 +262,23 @@ public class DataStreamPlayer {
     }
     
     private func internalPlay() {
+        // start AVAudioEngine
+        os_log("[%@] try to start audioEngine", log: .player, type: .debug, "\(id)")
+
         do {
             try Self.audioEngineManager.startAudioEngine()
         } catch {
-             os_log("[%@] audioEngine start failed", log: .audioEngine, type: .debug, "\(id)")
+            os_log("[%@] audioEngine start failed: %@", log: .audioEngine, type: .debug, "\(id)", "\(error.localizedDescription)")
+            return
         }
         
+        // play using AVAudioPlayerNode
+        guard isPlaying == false else {
+            os_log("[%@] audioPlayerNode is already running", log: .player, type: .debug, "\(id)")
+            return
+        }
+
+        os_log("[%@] try to start audioPlayerNode", log: .player, type: .debug, "\(id)")
         if let error = (STUnifiedErrorCatcher.try {
             player.play()
             os_log("[%@] player started", log: .player, type: .debug, "\(id)")
@@ -298,9 +321,9 @@ public class DataStreamPlayer {
      Stop AVAudioPlayerNode.
      */
     func reset() {
-        if let audioBufferObserver = audioBufferObserver {
-            notificationCenter.removeObserver(audioBufferObserver)
-        }
+        // Remove Observers
+        removeSessionObserver()
+        removeBufferObserver()
         
         // Detach nodes
         if let error = (STUnifiedErrorCatcher.try {
@@ -548,19 +571,10 @@ private extension DataStreamPlayer {
                 
                 guard let nextBuffer = self.audioBuffers[safe: self.scheduleBufferIndex] else {
                     guard self.lastBuffer == nil else { return }
+
                     os_log("[%@] waiting for next audio data.", log: .player, type: .debug, "\(self.id)")
+                    self.addBufferObserver()
                     
-                    self.notificationCenter.addObserver(forName: .audioBufferChange, object: self, queue: nil) { [weak self] (notification) in
-                        guard let self = self else { return }
-                        guard let nextBuffer = self.audioBuffers[safe: self.scheduleBufferIndex] else { return }
-                        
-                        os_log("[%@] Try to restart scheduler.", log: .player, type: .debug, "\(self.id)")
-                        self.scheduleBuffer(audioBuffer: nextBuffer)
-                        
-                        if let audioBufferObserver = self.audioBufferObserver {
-                            self.notificationCenter.removeObserver(audioBufferObserver)
-                        }
-                    }
                     return
                 }
                 
@@ -630,6 +644,69 @@ extension DataStreamPlayer: AudioEngineObservable {
 //            self.seek(to: resumeTime, completion: { [weak self] _ in
             self.internalPlay()
 //            })
+        }
+    }
+}
+
+// MARK: - Observers
+
+private extension DataStreamPlayer {
+    func addSessionObserver() {
+        audioSessionObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] (notification) in
+            guard let self = self else { return }
+            guard let userInfo = notification.userInfo,
+                  let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+                return
+            }
+            
+            switch type {
+            case .began:
+                os_log("[%@] AVAudioSession interruption began.", log: .player, type: .debug, "\(self.id)")
+                self.pause()
+                
+            case .ended:
+                os_log("[%@] AVAudioSession interruption ended.", log: .player, type: .debug, "\(self.id)")
+                
+                guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                if options.contains(.shouldResume) {
+                    self.audioQueue.async { [weak self] in
+                        guard self?.isPlaying == false else { return }
+                        self?.play()
+                    }
+                }
+                
+            default:
+                break
+            }
+        }
+    }
+    
+    func removeSessionObserver() {
+        if let audioSessionObserver = audioSessionObserver {
+            notificationCenter.removeObserver(audioSessionObserver)
+        }
+    }
+    
+    func addBufferObserver() {
+        audioBufferObserver = notificationCenter.addObserver(forName: .audioBufferChange, object: self, queue: nil) { [weak self] (notification) in
+            guard let self = self else { return }
+            guard let nextBuffer = self.audioBuffers[safe: self.scheduleBufferIndex] else { return }
+            
+            os_log("[%@] Try to restart scheduler.", log: .player, type: .debug, "\(self.id)")
+            self.scheduleBuffer(audioBuffer: nextBuffer)
+            self.removeBufferObserver()
+        }
+    }
+    
+    func removeBufferObserver() {
+        if let audioBufferObserver = audioBufferObserver {
+            notificationCenter.removeObserver(audioBufferObserver)
         }
     }
 }
