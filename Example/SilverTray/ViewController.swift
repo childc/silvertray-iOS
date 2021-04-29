@@ -16,6 +16,7 @@ import RxSwift
 class ViewController: UIViewController {
     @IBOutlet weak var playButton: UIButton!
     @IBOutlet weak var seekBar: UISlider!
+    @IBOutlet weak var audioPosition: UISlider!
     
     private let player = try? DataStreamPlayer(decoder: OpusDecoder(sampleRate: 24000, channels: 1))
     private var sliderUpdateDisposable: Disposable?
@@ -95,6 +96,10 @@ class ViewController: UIViewController {
                 self?.updateSlider()
             }
         })
+    }
+    
+    @IBAction func audioPositionXChanged(_ sender: UISlider) {
+        player?.audio3dPoint = AVAudio3DPoint(x: sender.value, y: 0.0, z: 0.0)
     }
 }
 

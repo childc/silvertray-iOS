@@ -35,6 +35,7 @@ public class DataStreamPlayer {
     #if !os(watchOS)
     private let speedController = AVAudioUnitVarispeed()
     private let pitchController = AVAudioUnitTimePitch()
+    private let environment = AVAudioEnvironmentNode()
     #endif
     
     private let audioFormat: AVAudioFormat
@@ -123,6 +124,36 @@ public class DataStreamPlayer {
             pitchController.pitch = newValue
         }
     }
+    
+    public var audio3dPoint: AVAudio3DPoint {
+        set {
+            player.position = newValue
+        }
+        
+        get {
+            player.position
+        }
+    }
+    
+    public var listener3dPoint: AVAudio3DPoint {
+        set {
+            environment.listenerPosition = newValue
+        }
+        
+        get {
+            environment.listenerPosition
+        }
+    }
+    
+    public var listenerAngularOrientation: AVAudio3DAngularOrientation {
+        set {
+            environment.listenerAngularOrientation = newValue
+        }
+        
+        get {
+            environment.listenerAngularOrientation
+        }
+    }
     #endif
     
     /**
@@ -159,6 +190,11 @@ public class DataStreamPlayer {
         
         // Hold this instance because properties of this should not be released outside.
         Self.audioEngineManager.registerObserver(self)
+        
+        player.renderingAlgorithm = .HRTFHQ
+        player.position = .init(x: 0.0, y: 0.0, z: 0.0)
+        environment.position = .init(x: 0.0, y: 0.0, z: 0.0)
+        environment.listenerAngularOrientation = .init(yaw: 0.0, pitch: 0.0, roll: 0.0)
     }
     
     /**
@@ -181,6 +217,7 @@ public class DataStreamPlayer {
         #if !os(watchOS)
         Self.audioEngineManager.attach(speedController)
         Self.audioEngineManager.attach(pitchController)
+        Self.audioEngineManager.attach(environment)
         #endif
         
         Self.audioEngineManager.attach(player)
@@ -190,11 +227,11 @@ public class DataStreamPlayer {
         #if !os(watchOS)
         Self.audioEngineManager.detach(speedController)
         Self.audioEngineManager.detach(pitchController)
+        Self.audioEngineManager.detach(environment)
         #endif
         
         Self.audioEngineManager.detach(player)
     }
-
     
     private func connectAudioChain() {
         if let error = (STUnifiedErrorCatcher.try { () -> Error? in
@@ -204,12 +241,16 @@ public class DataStreamPlayer {
             // To control speed, Put speedController into the chain
             // Pitch controller has rate too. But if you adjust it without pitch value, you will get unexpected audio rate.
             Self.audioEngineManager.connect(player, to: speedController, format: audioFormat)
+//            Self.audioEngineManager.connect(player, to: environment, format: audioFormat)
             
             // To control pitch, Put pitchController into the chain
             Self.audioEngineManager.connect(speedController, to: pitchController, format: audioFormat)
             
             // To control volume, Last of chain must me mixer node.
-            Self.audioEngineManager.connect(pitchController, to: Self.audioEngineManager.mainMixerNode, format: audioFormat)
+//            Self.audioEngineManager.connect(pitchController, to: Self.audioEngineManager.mainMixerNode, format: audioFormat)
+            Self.audioEngineManager.connect(pitchController, to: environment, format: audioFormat)
+//            Self.audioEngineManager.connect(environment, to: Self.audioEngineManager.outputNode, format: constructOutputConnectionFormatForEnvironment())
+            Self.audioEngineManager.connect(environment, to: Self.audioEngineManager.mainMixerNode, format: constructOutputConnectionFormatForEnvironment())
             #endif
             
             return nil
@@ -380,6 +421,7 @@ extension DataStreamPlayer {
      */
     public func lastDataAppended() throws {
         os_log("[%@] last data appended. No data can be appended any longer.", log: .player, type: .debug, "\(id)")
+        os_log("[%@] total duration of tts: %@ms", log: .player, type: .debug, "\(id)", "\(duration)")
         
         try audioQueue.sync {
             guard lastBuffer == nil else {
@@ -654,4 +696,52 @@ private extension Array where Element == Float {
 
 private extension Notification.Name {
     static let audioBufferChange = Notification.Name(rawValue: "com.sktelecom.silver_tray.audio_buffer")
+}
+
+
+// Spatial Audio
+
+extension DataStreamPlayer {
+    private func constructOutputConnectionFormatForEnvironment() -> AVAudioFormat {
+        let environmentOutputConnectionFormat: AVAudioFormat
+        let numHardwareOutputChannels = Self.audioEngineManager.outputNode.outputFormat(forBus: 0).channelCount
+        let hardwareSampleRate = Self.audioEngineManager.outputNode.outputFormat(forBus: 0).sampleRate
+        
+        // if we're connected to multichannel hardware, create a compatible multichannel format for the environment node
+        if numHardwareOutputChannels > 2 && numHardwareOutputChannels != 3 {
+            
+            // find an AudioChannelLayoutTag that the environment node knows how to render to
+            // this is documented in AVAudioEnvironmentNode.h
+            let environmentOutputLayoutTag: AudioChannelLayoutTag
+            switch numHardwareOutputChannels {
+            case 4:
+                environmentOutputLayoutTag = kAudioChannelLayoutTag_AudioUnit_4
+                
+            case 5:
+                environmentOutputLayoutTag = kAudioChannelLayoutTag_AudioUnit_5_0
+                
+            case 6:
+                environmentOutputLayoutTag = kAudioChannelLayoutTag_AudioUnit_6_0
+                
+            case 7:
+                environmentOutputLayoutTag = kAudioChannelLayoutTag_AudioUnit_7_0
+                
+            case 8:
+                environmentOutputLayoutTag = kAudioChannelLayoutTag_AudioUnit_8
+                
+            default:
+                // based on our logic, we shouldn't hit this case
+                environmentOutputLayoutTag = kAudioChannelLayoutTag_Stereo
+            }
+            
+            // using that layout tag, now construct a format
+            let environmentOutputChannelLayout = AVAudioChannelLayout(layoutTag: environmentOutputLayoutTag)
+            environmentOutputConnectionFormat = AVAudioFormat(standardFormatWithSampleRate: hardwareSampleRate, channelLayout: environmentOutputChannelLayout!)
+        } else {
+            // stereo rendering format, this is the common case
+            environmentOutputConnectionFormat = AVAudioFormat(standardFormatWithSampleRate: hardwareSampleRate, channels: 2)!
+        }
+        
+        return environmentOutputConnectionFormat
+    }
 }
